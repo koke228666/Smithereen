@@ -751,10 +751,20 @@ function applyServerCommand(cmd:any){
 		}
 		break;
 		case "refresh":
-			location.reload();
+		{
+			if(mobile)
+				location.reload();
+			else
+				ajaxNavigate(location.href, false);
+		}
 			break;
 		case "location":
-			location.href=cmd.l;
+		{
+			if(mobile)
+				location.href=cmd.l;
+			else
+				ajaxNavigate(cmd.l, cmd.l!=location.href);
+		}
 			break;
 		case "run":
 			eval(cmd.s);
@@ -1214,7 +1224,8 @@ function makeAvatar(urls:string[], baseSize:string, customSize:number=0):HTMLEle
 		]);
 	}
 	if(customSize){
-		el.style.width=el.style.height=customSize+"px";
+		el.style.setProperty("--ava-width", customSize+"px");
+		el.style.setProperty("--ava-height", customSize+"px");
 	}
 	return el;
 }
@@ -1252,7 +1263,9 @@ function showMailFormBox(el:HTMLAnchorElement){
 		box.show();
 		var button=box.getButton(0);
 		button.id="mailMessageFormSubmit";
-		postForm=new PostForm(ge("wallPostForm_mailMessage"));
+		var formEl=ge("wallPostForm_mailMessage");
+		postForm=new PostForm(formEl);
+		formEl.customData={postForm: postForm};
 		postForm.onSendDone=(success)=>{
 			if(success)
 				box.dismiss();

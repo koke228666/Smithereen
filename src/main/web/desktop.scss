@@ -901,14 +901,18 @@ _::-webkit-full-page-media, _:future, :root .post .repostIcon, :root .post .post
 	}
 }
 
-.oneMemberRow{
-	td{
-		padding-top: 8px;
-		padding-left: 8px;
+.memberList{
+	display: grid;
+	grid-template-columns: 32px auto;
+	padding: 10px 8px;
+	grid-gap: 8px 6px;
+	.nameAndInfo{
+		align-self: center;
+		padding-bottom: 1px;
 	}
 	.info{
-		margin-top: 4px;
-		color: $grayText;
+		color: $auxiliaryGrey;
+		font-size: 10px;
 	}
 }
 
@@ -1867,17 +1871,6 @@ select, .comboBoxW input{
 		font-size: 11px;
 		color: $boldHeaders;
 	}
-	.attachDelete{
-		display: inline-block;
-		width: 16px;
-		height: 16px;
-		background: svg-load('img/box_close.svg', fill: $iconColor) no-repeat center;
-		opacity: .7;
-		transition: opacity .2s ease;
-		&:hover{
-			opacity: 1;
-		}
-	}
 	&.postFormCW input, &.postFormPoll input[type=text]{
 		width: 100%;
 	}
@@ -1895,6 +1888,19 @@ select, .comboBoxW input{
 	}
 	.pollSetting{
 		display: block;
+	}
+}
+
+.postFormNonThumb .attachDelete, .deleteButton{
+	display: inline-block;
+	width: 16px;
+	height: 16px;
+	background: svg-load('img/box_close.svg', fill: $iconColor) no-repeat center;
+	opacity: .7;
+	transition: opacity .2s ease;
+	vertical-align: middle;
+	&:hover{
+		opacity: 1;
 	}
 }
 
@@ -2952,10 +2958,20 @@ label.pretendLink{
 	>.spanAll{
 		grid-column-start: span 3;
 	}
+	>.span2{
+		grid-column-start: span 2;
+	}
+	>.vSpanAll{
+		grid-row: 1/-1;
+	}
 }
 
 .borderBottom{
 	border-bottom: solid 1px $wallPostSeparator;
+}
+
+.borderTop{
+	border-top: solid 1px $wallPostSeparator;
 }
 
 .searchFieldWrap{
@@ -3548,6 +3564,16 @@ h2, h3, h4{
 	color: $text;
 	&:last-child{
 		border-bottom: none;
+	}
+	&.checkable{
+		display: flex;
+		>input{
+			flex: none;
+			margin-right: 10px;
+		}
+		>*{
+			flex-grow: 1;
+		}
 	}
 }
 
@@ -5203,13 +5229,16 @@ label.largeAccented{
 	.searchFieldWrap{
 		flex-grow: 1;
 	}
-	.secondaryTabBar{
+	.secondaryTabBar, .buttonW{
 		flex: none;
 		border: none;
 		padding-left: 0;
-		>a:last-child{
-			margin-right: 0;
-		}
+	}
+	.secondaryTabBar>a:last-child{
+		margin-right: 0;
+	}
+	.buttonW{
+		padding: 10px 10px 10px 0;
 	}
 }
 
@@ -5244,5 +5273,84 @@ ol.largeNumbers{
 
 .userBanPage .post{
 	border-bottom: none;
+}
+
+.bottomActionBar{
+	position: sticky;
+	bottom: 0;
+	.buttonBarAux{
+		padding-left: 10px;
+	}
+}
+
+.actionBarTitle{
+	color: $normalLink;
+	margin-left: 5px;
+	font-weight: bold;
+}
+
+.lightTabBar{
+	background: $bgGrey;
+	padding: 12px 0 0 10px;
+	display: flex;
+	flex-wrap: wrap;
+	border-bottom: solid 1px $wallPostSeparator;
+	a{
+		padding: 4px 10px 6px;
+		border: solid 1px $lightTabBorder;
+		border-bottom: none;
+		margin-right: 6px;
+		background: $lightTabBackground;
+		box-shadow: 0 -2px 0 inset rgba(0,0,0,0.03);
+		&:hover{
+			text-decoration: none;
+			background: $bg;
+		}
+		&.selected{
+			margin-bottom: -1px;
+			padding-bottom: 7px;
+			background: $bg;
+			box-shadow: none;
+		}
+	}
+}
+
+.groupEditLink{
+	display: flex;
+	picture{
+		display: block;
+	}
+	.ava{
+		flex: none;
+		margin-right: 10px;
+	}
+	.linkContent{
+		flex-grow: 1;
+		a{
+			font-weight: bold;
+		}
+	}
+	.actionList{
+		flex: none;
+	}
+}
+
+.groupEditLink{
+	border-bottom: solid 1px $wallPostSeparator;
+	padding: 10px 0;
+}
+
+.groupEditLinkW:last-child .groupEditLink{
+	border-bottom: solid 1px transparent;
+}
+
+.groupEditLinkW.beingDragged .groupEditLink{
+	background: $bg;
+	border-bottom: solid 1px transparent;
+	box-shadow: -10px 0 0 $bg, 10px 0 0 $bg;
+}
+
+#groupLinksReorderable{
+	margin: -10px 0;
 }
 

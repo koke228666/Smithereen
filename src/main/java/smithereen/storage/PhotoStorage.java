@@ -433,6 +433,7 @@ public class PhotoStorage{
 
 	public static void putOrUpdateForeignAlbum(PhotoAlbum album) throws SQLException{
 		try(DatabaseConnection conn=DatabaseConnectionManager.getConnection()){
+			album.id=getAlbumIdByActivityPubId(album.getActivityPubID());
 			if(album.systemType!=null){
 				// Make sure there's only ever one of each type of system album per owner.
 				// This query will not match any rows 99.9999% of the time, but if the other server is doing weird shit, it'll
@@ -503,6 +504,7 @@ public class PhotoStorage{
 
 	public static void putOrUpdateForeignPhoto(Photo photo) throws SQLException{
 		try(DatabaseConnection conn=DatabaseConnectionManager.getConnection()){
+			photo.id=getPhotoIdByActivityPubId(photo.getActivityPubID());
 			if(photo.id==0){
 				photo.id=new SQLQueryBuilder(conn)
 						.insertInto("photos")
@@ -763,5 +765,28 @@ public class PhotoStorage{
 				.executeAndGetLongStream()
 				.boxed()
 				.collect(Collectors.toSet());
+	}
+
+	public static PaginatedList<Photo> getAllPhotosByAuthor(int userID, int offset, int count) throws SQLException{
+		try(DatabaseConnection conn=DatabaseConnectionManager.getConnection()){
+			int total=new SQLQueryBuilder(conn)
+					.selectFrom("photos")
+					.count()
+					.where("author_id=?", userID)
+					.executeAndGetInt();
+			if(total==0)
+				return PaginatedList.emptyList(count);
+
+			List<Photo> photos=new SQLQueryBuilder(conn)
+					.selectFrom("photos")
+					.where("author_id=?", userID)
+					.limit(count, offset)
+					.orderBy("created_at DESC")
+					.executeAsStream(Photo::fromResultSet)
+					.toList();
+			postprocessPhotos(photos);
+
+			return new PaginatedList<>(photos, total, offset, count);
+		}
 	}
 }

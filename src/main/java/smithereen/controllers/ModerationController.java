@@ -27,6 +27,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import smithereen.ApplicationContext;
 import smithereen.Config;
@@ -44,6 +45,7 @@ import smithereen.exceptions.UserActionNotAllowedException;
 import smithereen.exceptions.UserErrorException;
 import smithereen.model.Account;
 import smithereen.model.ActivityPubRepresentable;
+import smithereen.model.ServerAnnouncement;
 import smithereen.model.ServerRule;
 import smithereen.model.admin.ActorStaffNote;
 import smithereen.model.admin.AdminNotifications;
@@ -77,6 +79,7 @@ import smithereen.model.admin.ViolationReport;
 import smithereen.model.admin.ViolationReportAction;
 import smithereen.model.media.MediaFileRecord;
 import smithereen.model.media.MediaFileReferenceType;
+import smithereen.model.reports.ReportableContentObjectID;
 import smithereen.model.reports.ReportedComment;
 import smithereen.model.viewmodel.AdminUserViewModel;
 import smithereen.model.viewmodel.UserRoleViewModel;
@@ -98,11 +101,13 @@ public class ModerationController{
 	private static final Logger LOG=LoggerFactory.getLogger(ModerationController.class);
 	private static final int REPORT_FILE_RETENTION_DAYS=7;
 
+	private final Object serverUpdateLock=new Object();
 	private final ApplicationContext context;
 	private final LruCache<String, Server> serversByDomainCache=new LruCache<>(500);
 	private List<EmailDomainBlockRule> emailDomainRules;
 	private List<IPBlockRule> ipRules;
 	private List<ServerRule> serverRules;
+	private List<ServerAnnouncement> currentAndFutureAnnouncements;
 
 	public ModerationController(ApplicationContext context){
 		this.context=context;
@@ -110,7 +115,7 @@ public class ModerationController{
 
 	// region Reporting
 
-	public void createViolationReport(User self, Actor target, @Nullable List<ReportableContentObject> content, ViolationReport.Reason reason, Set<Integer> rules, String comment, boolean forward){
+	public int createViolationReport(User self, Actor target, @Nullable List<ReportableContentObject> content, ViolationReport.Reason reason, Set<Integer> rules, String comment, boolean forward){
 		int reportID=createViolationReportInternal(self, target, content, reason, rules, comment, null);
 		if(forward && (target instanceof ForeignGroup || target instanceof ForeignUser)){
 			ArrayList<URI> objectIDs=new ArrayList<>();
@@ -119,6 +124,7 @@ public class ModerationController{
 				objectIDs.add(apr.getActivityPubID());
 			context.getActivityPubWorker().sendViolationReport(reportID, comment, objectIDs, target);
 		}
+		return reportID;
 	}
 
 	public void createViolationReport(@Nullable User self, Actor target, @Nullable List<ReportableContentObject> content, String comment, String otherServerDomain){
@@ -198,44 +204,52 @@ public class ModerationController{
 		}
 	}
 
+	public void populateFilesInReportableContent(List<ReportableContentObject> content){
+		HashSet<LocalImage> localImages=new HashSet<>();
+		List<Photo> photos=new ArrayList<>();
+		for(ReportableContentObject rco:content){
+			List<ActivityPubObject> attachments=switch(rco){
+				case Post p -> p.getAttachments();
+				case MailMessage m -> m.getAttachments();
+				case Photo p -> {
+					photos.add(p);
+					yield null;
+				}
+				case Comment c -> c.getAttachments();
+			};
+			if(attachments==null)
+				continue;
+			for(ActivityPubObject att: attachments){
+				if(att instanceof LocalImage li){
+					localImages.add(li);
+				}
+			}
+		}
+		try{
+			Set<Long> fileIDs=localImages.stream().map(li->li.fileID).collect(Collectors.toSet());
+			if(!fileIDs.isEmpty()){
+				Map<Long, MediaFileRecord> files=MediaStorage.getMediaFileRecords(fileIDs);
+				for(LocalImage li: localImages){
+					MediaFileRecord mfr=files.get(li.fileID);
+					if(mfr!=null)
+						li.fillIn(mfr);
+				}
+			}
+			if(!photos.isEmpty()){
+				PhotoStorage.postprocessPhotos(photos);
+			}
+		}catch(SQLException x){
+			throw new InternalServerErrorException(x);
+		}
+	}
+
 	public ViolationReport getViolationReportByID(int id, boolean needFiles){
 		try{
 			ViolationReport report=ModerationStorage.getViolationReportByID(id);
 			if(report==null)
 				throw new ObjectNotFoundException();
 			if(needFiles && !report.content.isEmpty()){
-				HashSet<LocalImage> localImages=new HashSet<>();
-				List<Photo> photos=new ArrayList<>();
-				for(ReportableContentObject rco: report.content){
-					List<ActivityPubObject> attachments=switch(rco){
-						case Post p -> p.getAttachments();
-						case MailMessage m -> m.getAttachments();
-						case Photo p -> {
-							photos.add(p);
-							yield null;
-						}
-						case Comment c -> c.getAttachments();
-					};
-					if(attachments==null)
-						continue;
-					for(ActivityPubObject att: attachments){
-						if(att instanceof LocalImage li){
-							localImages.add(li);
-						}
-					}
-				}
-				Set<Long> fileIDs=localImages.stream().map(li->li.fileID).collect(Collectors.toSet());
-				if(!fileIDs.isEmpty()){
-					Map<Long, MediaFileRecord> files=MediaStorage.getMediaFileRecords(fileIDs);
-					for(LocalImage li: localImages){
-						MediaFileRecord mfr=files.get(li.fileID);
-						if(mfr!=null)
-							li.fillIn(mfr);
-					}
-				}
-				if(!photos.isEmpty()){
-					PhotoStorage.postprocessPhotos(photos);
-				}
+				populateFilesInReportableContent(report.content);
 			}
 			return report;
 		}catch(SQLException x){
@@ -271,7 +285,8 @@ public class ModerationController{
 
 	public List<ViolationReportAction> getViolationReportActions(ViolationReport report){
 		try{
-			return ModerationStorage.getViolationReportActions(report.id);
+			List<ViolationReportAction> actions=ModerationStorage.getViolationReportActions(report.id);
+			return actions;
 		}catch(SQLException x){
 			throw new InternalServerErrorException(x);
 		}
@@ -420,6 +435,70 @@ public class ModerationController{
 		}
 	}
 
+	public void removeContentFromViolationReport(User admin, ViolationReport report, Collection<ReportableContentObjectID> contentIDs){
+		if(report.state!=ViolationReport.State.OPEN)
+			throw new UserActionNotAllowedException();
+		List<ReportableContentObject> removedObjects=report.content.stream().filter(o->contentIDs.contains(o.getReportableObjectID())).toList();
+		if(removedObjects.isEmpty())
+			return;
+		try{
+			HashSet<Long> contentFileIDs=new HashSet<>();
+			JsonArray removedContentJson=removedObjects.stream().map(o->o.serializeForReport(report.targetID, contentFileIDs)).collect(JsonArrayBuilder.COLLECTOR);
+			for(long fid:contentFileIDs){
+				MediaStorage.deleteMediaFileReference(report.id, MediaFileReferenceType.REPORT_OBJECT, fid);
+			}
+
+			report.content=report.content.stream().filter(o->!removedObjects.contains(o)).toList();
+			contentFileIDs.clear();
+			JsonArray newContent=report.content.stream().map(o->o.serializeForReport(report.targetID, contentFileIDs)).collect(JsonArrayBuilder.COLLECTOR);
+			ModerationStorage.updateViolationReportContent(report.id, newContent.toString(), !contentFileIDs.isEmpty());
+
+			ModerationStorage.createViolationReportAction(report.id, admin.id, ViolationReportAction.ActionType.REMOVE_CONTENT, null,
+					new JsonObjectBuilder().add("content", removedContentJson).build());
+		}catch(SQLException x){
+			throw new InternalServerErrorException(x);
+		}
+	}
+
+	public void addContentToViolationReport(User admin, ViolationReport report, List<ReportableContentObject> content){
+		if(report.state!=ViolationReport.State.OPEN)
+			throw new UserActionNotAllowedException();
+
+		Set<ReportableContentObjectID> existingObjectIDs=report.content.stream().map(ReportableContentObject::getReportableObjectID).collect(Collectors.toSet());
+		content=content.stream().filter(o->!existingObjectIDs.contains(o.getReportableObjectID())).toList();
+		if(content.isEmpty())
+			return;
+
+		HashSet<Long> oldFileIDs=new HashSet<>(), newFileIDs=new HashSet<>();
+		JsonArray serializedContent=report.content.stream().map(o->o.serializeForReport(report.targetID, oldFileIDs)).collect(JsonArrayBuilder.COLLECTOR);
+		JsonArray newContent=content.stream().map(o->o.serializeForReport(report.targetID, newFileIDs)).collect(JsonArrayBuilder.COLLECTOR);
+		serializedContent.addAll(newContent);
+		newFileIDs.removeAll(oldFileIDs);
+		try{
+			ModerationStorage.updateViolationReportContent(report.id, serializedContent.toString(), !oldFileIDs.isEmpty() || !newFileIDs.isEmpty());
+
+			for(long fid:newFileIDs){
+				MediaStorage.createMediaFileReference(fid, report.id, MediaFileReferenceType.REPORT_OBJECT, 0);
+			}
+
+			ModerationStorage.createViolationReportAction(report.id, admin.id, ViolationReportAction.ActionType.ADD_CONTENT, null,
+					new JsonObjectBuilder().add("content", newContent).build());
+		}catch(SQLException x){
+			throw new InternalServerErrorException(x);
+		}
+	}
+
+	public ViolationReportAction getViolationReportAction(ViolationReport report, int actionID){
+		try{
+			ViolationReportAction action=ModerationStorage.getViolationReportActionByID(report.id, actionID);
+			if(action==null)
+				throw new ObjectNotFoundException();
+			return action;
+		}catch(SQLException x){
+			throw new InternalServerErrorException(x);
+		}
+	}
+
 	// endregion
 	// region Federation & federation restrictions
 
@@ -467,10 +546,12 @@ public class ModerationController{
 			return server;
 
 		try{
-			server=FederationStorage.getServerByDomain(domain);
-			if(server==null){
-				int id=FederationStorage.addServer(domain);
-				server=new Server(id, domain, null, null, Instant.now(), null, 0, true, null, EnumSet.noneOf(Server.Feature.class));
+			synchronized(serverUpdateLock){
+				server=FederationStorage.getServerByDomain(domain);
+				if(server==null){
+					int id=FederationStorage.addServer(domain);
+					server=new Server(id, domain, null, null, Instant.now(), null, 0, true, null, EnumSet.noneOf(Server.Feature.class));
+				}
 			}
 			serversByDomainCache.put(domain, server);
 			return server;
@@ -1104,6 +1185,67 @@ public class ModerationController{
 					"translations", Utils.gson.toJson(rule.translations())
 			));
 			invalidateServerRuleCache();
+		}catch(SQLException x){
+			throw new InternalServerErrorException(x);
+		}
+	}
+
+	// endregion
+	// region Announcements
+
+	public void createAnnouncement(String title, String description, String linkTitle, String linkUrl, Instant showFrom, Instant showTo, Map<String, ServerAnnouncement.Translation> translations){
+		try{
+			ModerationStorage.createAnnouncement(title, description, linkTitle, linkUrl, showFrom, showTo, Utils.gson.toJson(translations));
+			currentAndFutureAnnouncements=null;
+		}catch(SQLException x){
+			throw new InternalServerErrorException(x);
+		}
+	}
+
+	public void updateAnnouncement(ServerAnnouncement announcement, String title, String description, String linkTitle, String linkUrl, Instant showFrom, Instant showTo, Map<String, ServerAnnouncement.Translation> translations){
+		try{
+			ModerationStorage.updateAnnouncement(announcement.id(), title, description, linkTitle, linkUrl, showFrom, showTo, Utils.gson.toJson(translations));
+			currentAndFutureAnnouncements=null;
+		}catch(SQLException x){
+			throw new InternalServerErrorException(x);
+		}
+	}
+
+	public List<ServerAnnouncement> getCurrentAndFutureAnnouncements(){
+		if(currentAndFutureAnnouncements!=null)
+			return currentAndFutureAnnouncements;
+
+		try{
+			currentAndFutureAnnouncements=Collections.unmodifiableList(ModerationStorage.getCurrentAndFutureAnnouncements());
+			return currentAndFutureAnnouncements;
+		}catch(SQLException x){
+			throw new InternalServerErrorException(x);
+		}
+	}
+
+	public PaginatedList<ServerAnnouncement> getAllAnnouncements(int offset, int count){
+		try{
+			return ModerationStorage.getAllAnnouncements(offset, count);
+		}catch(SQLException x){
+			throw new InternalServerErrorException(x);
+		}
+	}
+
+	public ServerAnnouncement getAnnouncement(int id){
+		try{
+			ServerAnnouncement announcement=ModerationStorage.getAnnouncement(id);
+			if(announcement==null)
+				throw new ObjectNotFoundException();
+			return announcement;
+		}catch(SQLException x){
+			throw new InternalServerErrorException(x);
+		}
+	}
+
+	public void deleteAnnouncement(ServerAnnouncement announcement){
+		try{
+			ModerationStorage.deleteAnnouncement(announcement.id());
+			currentAndFutureAnnouncements=null;
 		}catch(SQLException x){
 			throw new InternalServerErrorException(x);
 		}
