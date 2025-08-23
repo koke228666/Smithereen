@@ -1,7 +1,9 @@
 package smithereen.model;
 
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonPrimitive;
 
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -9,17 +11,26 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 
 import smithereen.Utils;
+import smithereen.activitypub.ActivityPub;
 import smithereen.activitypub.ParserContext;
 import smithereen.activitypub.objects.ActivityPubObject;
 import smithereen.activitypub.objects.Event;
 import smithereen.activitypub.objects.ForeignActor;
+import smithereen.activitypub.objects.PropertyValue;
+import smithereen.controllers.ObjectLinkResolver;
 import smithereen.exceptions.BadRequestException;
+import smithereen.http.HttpContentType;
 import smithereen.model.groups.GroupAdmin;
 import smithereen.model.groups.GroupFeatureState;
+import smithereen.model.groups.GroupLink;
 import smithereen.storage.DatabaseUtils;
+import smithereen.storage.FederationStorage;
 import smithereen.text.TextProcessor;
 import spark.utils.StringUtils;
 
@@ -30,6 +41,7 @@ public class ForeignGroup extends Group implements ForeignActor{
 	public URI members;
 	public URI tentativeMembers;
 	public EnumSet<Capability> capabilities=EnumSet.noneOf(ForeignGroup.Capability.class);
+	public List<GroupLink> linksFromActivityPub=List.of();
 
 	public static ForeignGroup fromResultSet(ResultSet res) throws SQLException{
 		ForeignGroup g=new ForeignGroup();
@@ -138,6 +150,65 @@ public class ForeignGroup extends Group implements ForeignActor{
 				photosState=GroupFeatureState.DISABLED;
 			if(boardTopics==null)
 				boardState=GroupFeatureState.DISABLED;
+		}
+
+		JsonArray links=optArrayCompact(obj, "links");
+		if(links!=null){
+			linksFromActivityPub=new ArrayList<>();
+			for(JsonElement el:links){
+				if(el instanceof JsonObject jLink && "Link".equals(optString(jLink, "type"))){
+					URI linkHref=tryParseURL(optString(jLink, "href"));
+					URI linkId=tryParseURL(optString(jLink, "id"));
+					String linkName=optString(jLink, "name");
+					int linkOrder=optInt(jLink, "displayOrder");
+					URI linkIconSrc=null;
+					JsonObject linkIcon=optObject(jLink, "icon");
+					if(linkIcon!=null){
+						linkIconSrc=tryParseURL(optString(linkIcon, "url"));
+					}
+					String linkMediaType=optString(jLink, "mediaType");
+					boolean linkIsAPObject=linkMediaType!=null && ActivityPub.EXPECTED_CONTENT_TYPE.matches(HttpContentType.from(linkMediaType));
+
+					if(linkHref!=null && linkId!=null && Utils.uriHostMatches(activityPubID, linkId) && linkName!=null){
+						GroupLink gl=new GroupLink();
+						gl.apID=linkId;
+						gl.url=linkHref;
+						gl.title=linkName;
+						gl.displayOrder=linkOrder;
+						gl.apImageURL=linkIconSrc;
+
+						if(linkIsAPObject){
+							try{
+								ObjectLinkResolver.ObjectTypeAndID objID=FederationStorage.getObjectTypeAndID(linkHref);
+								if(objID!=null){
+									gl.object=objID;
+								}else{
+									gl.isUnresolvedActivityPubObject=true;
+								}
+							}catch(SQLException x){
+								LOG.error("Failed to get AP object for {}", linkHref);
+							}
+						}
+
+						linksFromActivityPub.add(gl);
+					}
+				}
+			}
+		}
+
+		location=optString(obj, "vcard:Address");
+		if(attachment!=null && !attachment.isEmpty()){
+			for(ActivityPubObject att:attachment){
+				if(att instanceof PropertyValue pv && pv.name!=null){
+					// Get rid of Mastodon :emojis: and non-ASCII characters
+					String normalizedName=pv.name.toLowerCase().replaceAll(":[a-z0-9_]{2,}:", "").replaceAll("[^a-z0-9 -]", "").trim();
+					// Match against popular strings people use for these things
+					if(WEBSITE_FIELD_KEYS.contains(normalizedName)){
+						website=TextProcessor.stripHTML(pv.value, false);
+						break;
+					}
+				}
+			}
 		}
 
 		return this;

@@ -56,6 +56,7 @@ import smithereen.activitypub.objects.Document;
 import smithereen.activitypub.objects.Image;
 import smithereen.activitypub.objects.LocalImage;
 import smithereen.activitypub.objects.NoteOrQuestion;
+import smithereen.controllers.ObjectLinkResolver;
 import smithereen.exceptions.BadRequestException;
 import smithereen.exceptions.FederationException;
 import smithereen.exceptions.ObjectNotFoundException;
@@ -80,6 +81,7 @@ import smithereen.model.Post;
 import smithereen.model.ServerRule;
 import smithereen.model.admin.ViolationReport;
 import smithereen.model.board.BoardTopic;
+import smithereen.model.groups.GroupLink;
 import smithereen.model.media.PhotoViewerInlineData;
 import smithereen.model.reports.ReportableContentObject;
 import smithereen.model.SessionInfo;
@@ -297,6 +299,20 @@ public class SystemRoutes{
 				mime="image/webp";
 				itemType=MediaCache.ItemType.PHOTO;
 			}
+			case "group_link" -> {
+				requireQueryParams(req, "group", "link");
+				int groupID=safeParseInt(req.queryParams("group"));
+				long linkID=safeParseLong(req.queryParams("link"));
+				Account self=currentUserAccount(req);
+				Group g=ctx.getGroupsController().getGroupOrThrow(groupID);
+				ctx.getPrivacyController().enforceGroupContentAccess(req, g);
+				GroupLink link=ctx.getGroupsController().getLink(g, linkID);
+				if(link.apImageURL==null)
+					throw new BadRequestException();
+				uri=link.apImageURL;
+				mime="image/webp";
+				itemType=MediaCache.ItemType.PHOTO;
+			}
 			case null, default -> {
 				LOG.warn("unknown external file type {}", type);
 				return "";
@@ -438,7 +454,17 @@ public class SystemRoutes{
 		resp.type("application/json");
 		Lang l=lang(req);
 		try{
-			return new JsonObjectBuilder().add("success", switch(ctx.getSearchController().loadRemoteObject(self.user, uri)){
+			Object obj=ctx.getSearchController().loadRemoteObject(self.user, uri);
+			if(req.queryParams("group")!=null && req.queryParams("link")!=null){
+				try{
+					Group group=ctx.getGroupsController().getGroupOrThrow(safeParseInt(req.queryParams("group")));
+					GroupLink gl=ctx.getGroupsController().getLink(group, safeParseLong(req.queryParams("link")));
+					if(gl.isUnresolvedActivityPubObject && gl.url.toString().equals(uri)){
+						ctx.getGroupsController().setLinkResolved(group, gl, ObjectLinkResolver.getObjectIdFromObject(obj));
+					}
+				}catch(ObjectNotFoundException ignore){}
+			}
+			return new JsonObjectBuilder().add("success", switch(obj){
 				case Post post when post.getReplyLevel()>0 -> Config.localURI("/posts/"+post.replyKey.getFirst()+"#comment"+post.id).toString();
 				case Post post -> post.getInternalURL().toString();
 				case Actor actor -> actor.getProfileURL();

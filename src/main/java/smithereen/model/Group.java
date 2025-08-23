@@ -8,17 +8,24 @@ import java.net.URI;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 
 import smithereen.Config;
 import smithereen.Utils;
+import smithereen.activitypub.ActivityPub;
 import smithereen.activitypub.SerializerContext;
 import smithereen.activitypub.objects.Actor;
 import smithereen.activitypub.objects.Event;
+import smithereen.activitypub.objects.LocalImage;
+import smithereen.activitypub.objects.PropertyValue;
 import smithereen.jsonld.JLD;
 import smithereen.model.groups.GroupAdmin;
 import smithereen.model.groups.GroupFeatureState;
+import smithereen.model.groups.GroupLink;
 import smithereen.storage.DatabaseUtils;
+import smithereen.text.TextProcessor;
+import smithereen.util.JsonArrayBuilder;
 import smithereen.util.JsonObjectBuilder;
 import spark.utils.StringUtils;
 
@@ -32,6 +39,7 @@ public class Group extends Actor{
 	public GroupFeatureState wallState=GroupFeatureState.ENABLED_OPEN;
 	public GroupFeatureState photosState=GroupFeatureState.ENABLED_RESTRICTED;
 	public GroupFeatureState boardState=GroupFeatureState.ENABLED_RESTRICTED;
+	public String website, location;
 
 	public List<GroupAdmin> adminsForActivityPub;
 
@@ -97,6 +105,10 @@ public class Group extends Actor{
 		o.addProperty("wall", wallState.toString());
 		o.addProperty("photos", photosState.toString());
 		o.addProperty("board", boardState.toString());
+		if(StringUtils.isNotEmpty(website))
+			o.addProperty("web", website);
+		if(StringUtils.isNotEmpty(location))
+			o.addProperty("loc", location);
 		return o.toString();
 	}
 
@@ -124,7 +136,7 @@ public class Group extends Actor{
 			Event event=new Event();
 			event.startTime=eventStartTime;
 			event.endTime=eventEndTime;
-			attachment=List.of(event);
+			attachment=new ArrayList<>(List.of(event));
 		}
 
 		String fields=res.getString("profile_fields");
@@ -139,6 +151,18 @@ public class Group extends Actor{
 				photosState=Utils.enumValue(o.get("photos").getAsString(), GroupFeatureState.class);
 			if(o.has("board"))
 				boardState=Utils.enumValue(o.get("board").getAsString(), GroupFeatureState.class);
+			website=optString(o, "web");
+			location=optString(o, "loc");
+		}
+
+		if(StringUtils.isNotEmpty(website)){
+			if(attachment==null)
+				attachment=new ArrayList<>();
+			String url=TextProcessor.escapeHTML(website);
+			PropertyValue pv=new PropertyValue();
+			pv.name="Website";
+			pv.value="<a href=\""+url+"\" rel=\"me\">"+url+"</a>";
+			attachment.add(pv);
 		}
 	}
 
@@ -179,6 +203,7 @@ public class Group extends Actor{
 		serializerContext.addAlias("capabilities", "litepub:capabilities");
 		serializerContext.addAlias("acceptsJoins", "litepub:acceptsJoins");
 		serializerContext.addAlias("litepub", JLD.LITEPUB);
+		serializerContext.addAlias("vcard", JLD.VCARD);
 
 		JsonObject endpoints=obj.getAsJsonObject("endpoints");
 		if(accessType!=AccessType.OPEN){
@@ -201,6 +226,31 @@ public class Group extends Actor{
 		serializerContext.addSmIdType("pinnedBoardTopics");
 		obj.addProperty("boardTopics", groupURL+"/topics");
 		obj.addProperty("pinnedBoardTopics", groupURL+"/pinnedTopics");
+
+		List<GroupLink> links=serializerContext.appContext.getGroupsController().getLinks(this);
+		if(!links.isEmpty()){
+			serializerContext.addSmIdType("links");
+			serializerContext.addSmAlias("displayOrder");
+			JsonArrayBuilder linkArr=new JsonArrayBuilder();
+			for(GroupLink link:links){
+				JsonObjectBuilder linkBuilder=new JsonObjectBuilder()
+						.add("type", "Link")
+						.add("href", link.url.toString())
+						.add("id", Config.localURI("/groups/"+id+"/links/"+link.id).toString())
+						.add("name", link.title)
+						.add("displayOrder", link.displayOrder);
+				if(link.image instanceof LocalImage li){
+					linkBuilder.add("icon", li.asActivityPubObject(new JsonObject(), serializerContext));
+				}
+				if(link.object!=null){
+					linkBuilder.add("mediaType", ActivityPub.CONTENT_TYPE);
+				}
+				linkArr.add(linkBuilder);
+			}
+			obj.add("links", linkArr.build());
+		}
+		if(StringUtils.isNotEmpty(location))
+			obj.addProperty("vcard:Address", location);
 
 		return obj;
 	}

@@ -250,7 +250,7 @@ public class GroupsController{
 	}
 
 	public void updateGroupInfo(@NotNull Group group, @NotNull User admin, String name, String aboutSrc, Instant eventStart, Instant eventEnd, String username, Group.AccessType accessType,
-								GroupFeatureState wallState, GroupFeatureState photosState, GroupFeatureState boardState){
+								GroupFeatureState wallState, GroupFeatureState photosState, GroupFeatureState boardState, String website, String location){
 		try{
 			enforceUserAdminLevel(group, admin, Group.AdminLevel.ADMIN);
 			String about=StringUtils.isNotEmpty(aboutSrc) ? TextProcessor.preprocessPostHTML(aboutSrc, null) : null;
@@ -271,13 +271,29 @@ public class GroupsController{
 				photosState=GroupFeatureState.ENABLED_RESTRICTED;
 			if(boardState==GroupFeatureState.ENABLED_CLOSED)
 				boardState=GroupFeatureState.ENABLED_RESTRICTED;
+			boolean needUpdateFields=false, needClearFeed=false;
 			if(group.wallState!=wallState || group.photosState!=photosState || group.boardState!=boardState){
 				group.wallState=wallState;
 				group.photosState=photosState;
 				group.boardState=boardState;
-				GroupStorage.updateProfileFields(group);
-				context.getNewsfeedController().clearGroupsFeedCache();
+				needUpdateFields=needClearFeed=true;
 			}
+
+			if(!group.isEvent())
+				location=null;
+			if(website!=null && !website.startsWith("https:") && !website.startsWith("http:"))
+				website="https://"+website;
+			if(!Objects.equals(group.website, website) || !Objects.equals(group.location, location)){
+				group.website=website;
+				group.location=location;
+				needUpdateFields=true;
+			}
+
+			if(needUpdateFields)
+				GroupStorage.updateProfileFields(group);
+			if(needClearFeed)
+				context.getNewsfeedController().clearGroupsFeedCache();
+
 			context.getActivityPubWorker().sendUpdateGroupActivity(group);
 			if(group.isEvent()){
 				BackgroundTaskRunner.getInstance().submit(()->{
@@ -876,7 +892,7 @@ public class GroupsController{
 			if(imageID!=0){
 				MediaStorage.createMediaFileReference(imageID, id, MediaFileReferenceType.GROUP_LINK_THUMB, -group.id);
 			}
-			// TODO Update{Group}
+			context.getActivityPubWorker().sendUpdateGroupActivity(group);
 			return id;
 		}catch(SQLException x){
 			throw new InternalServerErrorException(x);
@@ -888,7 +904,7 @@ public class GroupsController{
 			List<GroupLink> links=GroupStorage.getGroupLinks(group.id);
 			for(GroupLink l:links){
 				if(l.object!=null){
-					l.url=ObjectLinkResolver.getLocalURLForObjectID(l.object);
+					l.localUrl=ObjectLinkResolver.getLocalURLForObjectID(l.object);
 				}
 			}
 			return links;
@@ -911,7 +927,7 @@ public class GroupsController{
 	public void setLinkOrder(Group group, GroupLink link, int order){
 		try{
 			GroupStorage.setLinkOrder(group.id, link.id, order);
-			// TODO Update{Group}
+			context.getActivityPubWorker().sendUpdateGroupActivity(group);
 		}catch(SQLException x){
 			throw new InternalServerErrorException(x);
 		}
@@ -920,7 +936,7 @@ public class GroupsController{
 	public void updateLinkTitle(Group group, GroupLink link, String title){
 		try{
 			GroupStorage.updateLinkTitle(group.id, link.id, title);
-			// TODO Update{Group}
+			context.getActivityPubWorker().sendUpdateGroupActivity(group);
 		}catch(SQLException x){
 			throw new InternalServerErrorException(x);
 		}
@@ -929,7 +945,15 @@ public class GroupsController{
 	public void deleteLink(Group group, GroupLink link){
 		try{
 			GroupStorage.deleteLink(group.id, link.id);
-			// TODO Update{Group}
+			context.getActivityPubWorker().sendUpdateGroupActivity(group);
+		}catch(SQLException x){
+			throw new InternalServerErrorException(x);
+		}
+	}
+
+	public void setLinkResolved(Group group, GroupLink link, ObjectLinkResolver.ObjectTypeAndID obj){
+		try{
+			GroupStorage.resolveLink(group.id, link.id, obj);
 		}catch(SQLException x){
 			throw new InternalServerErrorException(x);
 		}
